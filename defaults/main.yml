@@ -1,0 +1,11 @@
+---
+nginx_docker_image: nginx:latest
+
+nginx_docker_network: bridge
+nginx_docker_publish_ports: []
+
+nginx_uid: "8080"
+nginx_gid: "8080"
+
+nginx_servers_config_files: []
+nginx_ssl_files: []

@@ -1,0 +1,114 @@
+---
+- name: check mandatory variables
+  ansible.builtin.assert:
+    that:
+      - nginx_main_config is defined
+    quiet: true
+
+- name: ensure group
+  ansible.builtin.group:
+    name: nginx
+    gid: "{{ nginx_gid }}"
+
+- name: ensure user
+  ansible.builtin.user:
+    name: nginx
+    group: nginx
+    shell: /sbin/nologin
+    uid: "{{ nginx_uid }}"
+    home: /etc/nginx
+    create_home: false
+
+- name: ensure config directories
+  ansible.builtin.file:
+    state: directory
+    path: "{{ item }}"
+    owner: "{{ nginx_uid }}"
+    group: "{{ nginx_uid }}"
+    mode: 0750
+  with_items: [/etc/nginx, /etc/nginx/conf.d, /etc/nginx/ssl, /var/cache/nginx]
+
+- name: ensure main config
+  notify: restart service nginx
+  ansible.builtin.copy:
+    dest: /etc/nginx/nginx.conf
+    content: "{{ nginx_main_config }}"
+    owner: "{{ nginx_uid }}"
+    group: "{{ nginx_uid }}"
+    mode: 0640
+
+- name: ensure servers configs
+  notify: reload service nginx
+  ansible.builtin.copy:
+    dest: "/etc/nginx/conf.d/{{ item.filename }}"
+    content: "{{ item.content }}"
+    owner: "{{ nginx_uid }}"
+    group: "{{ nginx_uid }}"
+    mode: 0640
+  loop: "{{ nginx_servers_config_files }}"
+
+- name: ensure ssl files
+  notify: restart service nginx
+  ansible.builtin.copy:
+    dest: "/etc/nginx/ssl/{{ item.filename }}"
+    content: "{{ item.content }}"
+    owner: "{{ nginx_uid }}"
+    group: "{{ nginx_uid }}"
+    mode: 0640
+  loop: "{{ nginx_ssl_files }}"
+
+- name: ensure systemd nginx.service
+  notify: restart service nginx
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nginx.service
+    owner: root
+    group: root
+    mode: 0644
+    content: |
+      [Unit]
+      Requires=docker.service
+      After=docker.service
+      StartLimitIntervalSec=0
+      [Service]
+      ExecStartPre=-/usr/bin/docker rm --force %N
+      ExecStart=/usr/bin/docker run \
+        --name=%N \
+        --rm=true \
+        --pid=host \
+        --log-driver=none \
+        --stop-timeout=30 \
+        --user={{ nginx_uid }}:{{ nginx_gid }} \
+        --network={{ nginx_docker_network }} \
+        {% if nginx_docker_network != 'host' -%}
+        {% for publish in nginx_docker_publish_ports -%}
+        --publish={{ publish }} \
+        {% endfor -%}
+        {% endif -%}
+        --volume=/etc/localtime:/etc/localtime:ro \
+        --volume=/etc/timezone:/etc/timezone:ro \
+        --volume=/etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
+        --volume=/etc/nginx/conf.d:/etc/nginx/conf.d:ro \
+        --volume=/etc/nginx/ssl:/etc/nginx/ssl:ro \
+        --volume=/var/cache/nginx:/var/cache/nginx:rw \
+        --volume=/etc/ssl/certs:/etc/ssl/certs:ro \
+        --volume=/usr/local/share/ca-certificates:/usr/local/share/ca-certificates:ro \
+        --workdir=/etc/nginx \
+        --entrypoint=nginx \
+        {{ nginx_docker_image }} -g 'daemon off;'
+      ExecReload=/bin/kill -s HUP $MAINPID
+      ExecStop=/usr/bin/docker stop %N
+      Restart=always
+      RestartSec=10
+      KillMode=process
+      [Install]
+      WantedBy=multi-user.target
+
+- name: execute handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: start service nginx
+  ansible.builtin.systemd:
+    name: nginx
+    daemon_reload: true
+    enabled: true
+    state: started
